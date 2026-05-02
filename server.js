@@ -13,22 +13,24 @@ let receivers = [];
 
 wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://localhost').searchParams.get('role');
-  console.log(`Connected: ${role}`);
+  console.log(`Connected: ${role}, total receivers: ${receivers.length}`);
 
   if (role === 'sender') {
     sender = ws;
     console.log('Sender connected');
 
-    ws.on('message', (data) => {
-      if (Buffer.isBuffer(data)) {
-        // 音频数据，转发给所有接收端
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        // 音频二进制数据，直接转发
+        console.log(`Forwarding ${data.length} bytes to ${receivers.length} receivers`);
         receivers.forEach(r => {
-          if (r.readyState === WebSocket.OPEN) r.send(data);
+          if (r.readyState === WebSocket.OPEN) {
+            r.send(data, { binary: true });
+          }
         });
       } else {
-        // 文字消息
-        const msg = data.toString();
-        console.log('Sender msg:', msg);
+        // 文字控制消息
+        console.log('Sender text msg:', data.toString());
       }
     });
 
@@ -39,17 +41,16 @@ wss.on('connection', (ws, req) => {
 
   } else if (role === 'receiver') {
     receivers.push(ws);
-    console.log(`Receivers: ${receivers.length}`);
+    console.log(`Receiver joined, total: ${receivers.length}`);
 
-    // 通知sender有接收端上线
+    // 通知sender
     if (sender && sender.readyState === WebSocket.OPEN) {
       sender.send(JSON.stringify({ event: 'receiver_joined', count: receivers.length }));
     }
 
     ws.on('close', () => {
       receivers = receivers.filter(r => r !== ws);
-      console.log(`Receivers: ${receivers.length}`);
-      // 通知sender接收端下线
+      console.log(`Receiver left, total: ${receivers.length}`);
       if (sender && sender.readyState === WebSocket.OPEN) {
         sender.send(JSON.stringify({ event: 'receiver_left', count: receivers.length }));
       }
