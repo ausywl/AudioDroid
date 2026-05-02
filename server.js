@@ -1,3 +1,4 @@
+process.env.WEB_CONCURRENCY = 1;
 const WebSocket = require('ws');
 const http = require('http');
 
