@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --max-old-space-size=256 server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "ws": "^8.16.0"
