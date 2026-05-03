@@ -1,4 +1,3 @@
-process.env.WEB_CONCURRENCY = 1;
 const WebSocket = require('ws');
 const http = require('http');
 
@@ -9,51 +8,63 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-let sender = null;
-let receivers = [];
+// 按频道分组
+const channels = {};
+
+function getChannel(name) {
+  if (!channels[name]) {
+    channels[name] = { sender: null, receivers: [] };
+  }
+  return channels[name];
+}
 
 wss.on('connection', (ws, req) => {
-  const role = new URL(req.url, 'http://localhost').searchParams.get('role');
-  console.log(`Connected: ${role}, total receivers: ${receivers.length}`);
+  const params = new URL(req.url, 'http://localhost').searchParams;
+  const role = params.get('role');
+  const channelName = params.get('channel') || 'default';
+  const ch = getChannel(channelName);
+
+  console.log(`Connected: ${role} channel=${channelName}`);
 
   if (role === 'sender') {
-    sender = ws;
-    console.log('Sender connected');
+    ch.sender = ws;
 
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
-        // 音频二进制数据，直接转发
-        console.log(`Forwarding ${data.length} bytes to ${receivers.length} receivers`);
-        receivers.forEach(r => {
+        ch.receivers.forEach(r => {
           if (r.readyState === WebSocket.OPEN) {
             r.send(data, { binary: true });
           }
         });
       } else {
-        // 文字控制消息
-        console.log('Sender text msg:', data.toString());
+        console.log(`[${channelName}] sender msg:`, data.toString());
       }
     });
 
     ws.on('close', () => {
-      sender = null;
-      console.log('Sender disconnected');
+      ch.sender = null;
+      console.log(`[${channelName}] Sender disconnected`);
     });
 
   } else if (role === 'receiver') {
-    receivers.push(ws);
-    console.log(`Receiver joined, total: ${receivers.length}`);
+    ch.receivers.push(ws);
+    console.log(`[${channelName}] Receivers: ${ch.receivers.length}`);
 
-    // 通知sender
-    if (sender && sender.readyState === WebSocket.OPEN) {
-      sender.send(JSON.stringify({ event: 'receiver_joined', count: receivers.length }));
+    if (ch.sender && ch.sender.readyState === WebSocket.OPEN) {
+      ch.sender.send(JSON.stringify({
+        event: 'receiver_joined',
+        count: ch.receivers.length
+      }));
     }
 
     ws.on('close', () => {
-      receivers = receivers.filter(r => r !== ws);
-      console.log(`Receiver left, total: ${receivers.length}`);
-      if (sender && sender.readyState === WebSocket.OPEN) {
-        sender.send(JSON.stringify({ event: 'receiver_left', count: receivers.length }));
+      ch.receivers = ch.receivers.filter(r => r !== ws);
+      console.log(`[${channelName}] Receivers: ${ch.receivers.length}`);
+      if (ch.sender && ch.sender.readyState === WebSocket.OPEN) {
+        ch.sender.send(JSON.stringify({
+          event: 'receiver_left',
+          count: ch.receivers.length
+        }));
       }
     });
   }
