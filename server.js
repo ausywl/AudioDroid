@@ -18,6 +18,7 @@ function getChannel(name) {
   return channels[name];
 }
 
+console.log(`New connection: role=${role} channel=${channelName} url=${req.url}`);
 wss.on('connection', (ws, req) => {
   const params = new URL(req.url, 'http://localhost').searchParams;
   const role = params.get('role');
