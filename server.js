@@ -28,7 +28,12 @@ wss.on('connection', (ws, req) => {
   console.log(`Connected: ${role} channel=${channelName}`);
 
   if (role === 'sender') {
+    // 断开旧的sender
+    if (ch.sender && ch.sender.readyState === WebSocket.OPEN) {
+        ch.sender.close();
+    }
     ch.sender = ws;
+    console.log(`[${channelName}] Sender connected`);
 
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
