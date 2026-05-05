@@ -8,7 +8,6 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-// 按频道分组
 const channels = {};
 
 function getChannel(name) {
@@ -18,19 +17,18 @@ function getChannel(name) {
   return channels[name];
 }
 
-console.log(`New connection: role=${role} channel=${channelName} url=${req.url}`);
 wss.on('connection', (ws, req) => {
   const params = new URL(req.url, 'http://localhost').searchParams;
   const role = params.get('role');
   const channelName = params.get('channel') || 'default';
   const ch = getChannel(channelName);
 
-  console.log(`Connected: ${role} channel=${channelName}`);
+  console.log(`New connection: role=${role} channel=${channelName}`);
 
   if (role === 'sender') {
     // 断开旧的sender
     if (ch.sender && ch.sender.readyState === WebSocket.OPEN) {
-        ch.sender.close();
+      ch.sender.close();
     }
     ch.sender = ws;
     console.log(`[${channelName}] Sender connected`);
@@ -42,13 +40,11 @@ wss.on('connection', (ws, req) => {
             r.send(data, { binary: true });
           }
         });
-      } else {
-        console.log(`[${channelName}] sender msg:`, data.toString());
       }
     });
 
     ws.on('close', () => {
-      ch.sender = null;
+      if (ch.sender === ws) ch.sender = null;
       console.log(`[${channelName}] Sender disconnected`);
     });
 
