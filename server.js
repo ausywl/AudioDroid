@@ -57,7 +57,6 @@ function getOpenReceiverCount(channel) {
 }
 
 function checkConflict() {
-  // 检查是否有多个频道同时有receiver连接
   const activeChannels = [];
   receiversByChannel.forEach((receivers, channel) => {
     if (channel !== DEFAULT_CHANNEL) {
@@ -68,9 +67,8 @@ function checkConflict() {
 
   if (activeChannels.length > 1) {
     console.log(`Conflict detected: ${activeChannels.join(', ')} - stopping all`);
-    // 通知所有sender停止
     activeChannels.forEach(channel => {
-      notifySender(channel, 'receiver_left', 0);
+      notifySender(channel, 'conflict', 0);
     });
   }
 }
@@ -118,11 +116,11 @@ wss.on('connection', (ws, req) => {
     receivers.push(ws);
     console.log(`Receivers ${channel}: ${receivers.length}`);
 
-    // 延迟3秒检查冲突，给所有App时间连上来
+    // 延迟3秒检查冲突
     if (conflictTimer) clearTimeout(conflictTimer);
     conflictTimer = setTimeout(checkConflict, 3000);
 
-    // 同时也通知sender
+    // 通知sender
     notifySender(channel, 'receiver_joined', getOpenReceiverCount(channel));
 
     ws.on('close', () => {
@@ -136,7 +134,6 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (err) => console.error('WS error:', err));
 });
 
-// 定期清理服务时间外的连接
 setInterval(() => {
   if (isServiceOpen()) return;
   senders.forEach((sender) => {
