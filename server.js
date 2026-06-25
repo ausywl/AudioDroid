@@ -32,6 +32,7 @@ const wss = new WebSocket.Server({ server });
 const DEFAULT_CHANNEL = 'default';
 let senders = new Map();
 let receiversByChannel = new Map();
+let conflictTimer = null;
 
 function getChannel(url) {
   return url.searchParams.get('channel') || DEFAULT_CHANNEL;
@@ -51,14 +52,27 @@ function notifySender(channel, event, count) {
   }
 }
 
-function getReceiverTargets(channel) {
-  const channelReceivers = getReceivers(channel);
-  if (channel === DEFAULT_CHANNEL) return channelReceivers;
-  return channelReceivers.concat(getReceivers(DEFAULT_CHANNEL));
+function getOpenReceiverCount(channel) {
+  return getReceivers(channel).filter((r) => r.readyState === WebSocket.OPEN).length;
 }
 
-function getOpenReceiverCount(channel) {
-  return getReceiverTargets(channel).filter((receiver) => receiver.readyState === WebSocket.OPEN).length;
+function checkConflict() {
+  // 检查是否有多个频道同时有receiver连接
+  const activeChannels = [];
+  receiversByChannel.forEach((receivers, channel) => {
+    if (channel !== DEFAULT_CHANNEL) {
+      const count = receivers.filter(r => r.readyState === WebSocket.OPEN).length;
+      if (count > 0) activeChannels.push(channel);
+    }
+  });
+
+  if (activeChannels.length > 1) {
+    console.log(`Conflict detected: ${activeChannels.join(', ')} - stopping all`);
+    // 通知所有sender停止
+    activeChannels.forEach(channel => {
+      notifySender(channel, 'receiver_left', 0);
+    });
+  }
 }
 
 wss.on('connection', (ws, req) => {
@@ -75,29 +89,27 @@ wss.on('connection', (ws, req) => {
   console.log(`Connected: ${role}/${channel}`);
 
   if (role === 'sender') {
+    if (senders.has(channel)) {
+      const old = senders.get(channel);
+      if (old.readyState === WebSocket.OPEN) old.close();
+    }
     senders.set(channel, ws);
     console.log(`Sender connected: ${channel}`);
+
     if (getOpenReceiverCount(channel) > 0) {
       notifySender(channel, 'receiver_joined', getOpenReceiverCount(channel));
     }
 
-    ws.on('message', (data) => {
-      if (Buffer.isBuffer(data)) {
-        // 音频数据，只转发给同频道接收端
-        getReceiverTargets(channel).forEach(r => {
-          if (r.readyState === WebSocket.OPEN) r.send(data);
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        getReceivers(channel).forEach(r => {
+          if (r.readyState === WebSocket.OPEN) r.send(data, { binary: true });
         });
-      } else {
-        // 文字消息
-        const msg = data.toString();
-        console.log('Sender msg:', msg);
       }
     });
 
     ws.on('close', () => {
-      if (senders.get(channel) === ws) {
-        senders.delete(channel);
-      }
+      if (senders.get(channel) === ws) senders.delete(channel);
       console.log(`Sender disconnected: ${channel}`);
     });
 
@@ -106,54 +118,38 @@ wss.on('connection', (ws, req) => {
     receivers.push(ws);
     console.log(`Receivers ${channel}: ${receivers.length}`);
 
-    // 通知sender有接收端上线
+    // 延迟3秒检查冲突，给所有App时间连上来
+    if (conflictTimer) clearTimeout(conflictTimer);
+    conflictTimer = setTimeout(checkConflict, 3000);
+
+    // 同时也通知sender
     notifySender(channel, 'receiver_joined', getOpenReceiverCount(channel));
-    if (channel === DEFAULT_CHANNEL) {
-      senders.forEach((sender, senderChannel) => {
-        if (senderChannel !== DEFAULT_CHANNEL && sender.readyState === WebSocket.OPEN) {
-          sender.send(JSON.stringify({ event: 'receiver_joined', count: getOpenReceiverCount(senderChannel) }));
-        }
-      });
-    }
 
     ws.on('close', () => {
       const remaining = getReceivers(channel).filter(r => r !== ws);
       receiversByChannel.set(channel, remaining);
       console.log(`Receivers ${channel}: ${remaining.length}`);
-      // 通知sender接收端下线
       notifySender(channel, 'receiver_left', getOpenReceiverCount(channel));
-      if (channel === DEFAULT_CHANNEL) {
-        senders.forEach((sender, senderChannel) => {
-          if (senderChannel !== DEFAULT_CHANNEL && sender.readyState === WebSocket.OPEN) {
-            sender.send(JSON.stringify({ event: 'receiver_left', count: getOpenReceiverCount(senderChannel) }));
-          }
-        });
-      }
     });
   }
 
   ws.on('error', (err) => console.error('WS error:', err));
 });
 
-const PORT = process.env.PORT || 3000;
+// 定期清理服务时间外的连接
 setInterval(() => {
   if (isServiceOpen()) return;
-
   senders.forEach((sender) => {
-    if (sender.readyState === WebSocket.OPEN) {
-      sender.close(1000, 'Outside service hours');
-    }
+    if (sender.readyState === WebSocket.OPEN) sender.close(1000, 'Outside service hours');
   });
-
   receiversByChannel.forEach((receivers) => {
     receivers.forEach((receiver) => {
-      if (receiver.readyState === WebSocket.OPEN) {
-        receiver.close(1000, 'Outside service hours');
-      }
+      if (receiver.readyState === WebSocket.OPEN) receiver.close(1000, 'Outside service hours');
     });
   });
   senders.clear();
   receiversByChannel.clear();
 }, 60 * 1000);
 
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server on port ${PORT}`));
