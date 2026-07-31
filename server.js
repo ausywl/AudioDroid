@@ -1,9 +1,26 @@
-const WebSocket = require('ws');
+'use strict';
+
 const http = require('http');
+const WebSocket = require('ws');
 
 const SERVICE_TIME_ZONE = 'Australia/Sydney';
 const SERVICE_START_MINUTES = 11 * 60 + 30;
 const SERVICE_END_MINUTES = 23 * 60;
+const DEFAULT_CHANNEL = 'default';
+const MAX_CHANNEL_LENGTH = 32;
+const MAX_AUDIO_MESSAGE_BYTES = 64 * 1024;
+const MAX_BUFFERED_BYTES = 64 * 1024;
+const MAX_CONSECUTIVE_DROPS = 300;
+const MAX_CONNECTIONS = 100;
+const HEALTH_INTERVAL_MS = 30 * 1000;
+
+const senders = new Map();
+const receiversByChannel = new Map();
+const receiverHealth = new WeakMap();
+
+function log(message) {
+  console.log(`${new Date().toISOString()} ${message}`);
+}
 
 function getServiceMinutes() {
   const parts = new Intl.DateTimeFormat('en-AU', {
@@ -12,141 +29,298 @@ function getServiceMinutes() {
     minute: '2-digit',
     hourCycle: 'h23',
   }).formatToParts(new Date());
-  const hour = Number(parts.find((p) => p.type === 'hour').value);
-  const minute = Number(parts.find((p) => p.type === 'minute').value);
+  const hour = Number(parts.find((part) => part.type === 'hour').value);
+  const minute = Number(parts.find((part) => part.type === 'minute').value);
   return hour * 60 + minute;
 }
 
 function isServiceOpen() {
+  if (process.env.AUDIODROID_FORCE_SERVICE_OPEN === '1') {
+    return true;
+  }
   const minutes = getServiceMinutes();
   return minutes >= SERVICE_START_MINUTES && minutes < SERVICE_END_MINUTES;
 }
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end(isServiceOpen() ? 'Audio Relay Server Running' : 'Audio Relay Server Sleeping');
-});
-
-const wss = new WebSocket.Server({ server });
-
-const DEFAULT_CHANNEL = 'default';
-let senders = new Map();
-let receiversByChannel = new Map();
-let conflictTimer = null;
-
-function getChannel(url) {
-  return url.searchParams.get('channel') || DEFAULT_CHANNEL;
+function parseConnection(req) {
+  const url = new URL(req.url, 'http://localhost');
+  const role = url.searchParams.get('role');
+  const channel = url.searchParams.get('channel') || DEFAULT_CHANNEL;
+  const validRole = role === 'sender' || role === 'receiver';
+  const validChannel =
+    channel.length <= MAX_CHANNEL_LENGTH && /^[a-zA-Z0-9_-]+$/.test(channel);
+  return { role, channel, valid: validRole && validChannel };
 }
 
 function getReceivers(channel) {
+  return receiversByChannel.get(channel) || [];
+}
+
+function ensureReceivers(channel) {
   if (!receiversByChannel.has(channel)) {
     receiversByChannel.set(channel, []);
   }
   return receiversByChannel.get(channel);
 }
 
-function notifySender(channel, event, count) {
-  const sender = senders.get(channel);
-  if (sender && sender.readyState === WebSocket.OPEN) {
-    sender.send(JSON.stringify({ event, count }));
+function getReceiverTargets(channel) {
+  const channelReceivers = getReceivers(channel);
+  if (channel === DEFAULT_CHANNEL) {
+    return channelReceivers;
   }
+  return channelReceivers.concat(getReceivers(DEFAULT_CHANNEL));
 }
 
 function getOpenReceiverCount(channel) {
-  return getReceivers(channel).filter((r) => r.readyState === WebSocket.OPEN).length;
+  return getReceiverTargets(channel).filter(
+    (receiver) => receiver.readyState === WebSocket.OPEN,
+  ).length;
 }
 
-function checkConflict() {
-  const activeChannels = [];
-  receiversByChannel.forEach((receivers, channel) => {
-    if (channel !== DEFAULT_CHANNEL) {
-      const count = receivers.filter(r => r.readyState === WebSocket.OPEN).length;
-      if (count > 0) activeChannels.push(channel);
-    }
-  });
-
-  if (activeChannels.length > 1) {
-    console.log(`Conflict detected: ${activeChannels.join(', ')} - stopping all`);
-    activeChannels.forEach(channel => {
-      notifySender(channel, 'conflict', 0);
-    });
+function safeSend(ws, payload, options) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  try {
+    ws.send(payload, options);
+    return true;
+  } catch (error) {
+    log(`Send failed: ${error.message}`);
+    ws.terminate();
+    return false;
   }
 }
 
-wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'http://localhost');
-  const role = url.searchParams.get('role');
-  const channel = getChannel(url);
+function notifySender(channel, event) {
+  const sender = senders.get(channel);
+  if (!sender || sender.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  safeSend(
+    sender,
+    JSON.stringify({
+      event,
+      count: getOpenReceiverCount(channel),
+    }),
+  );
+}
 
+function notifyDefaultReceiverChange(event) {
+  senders.forEach((sender, senderChannel) => {
+    if (
+      senderChannel !== DEFAULT_CHANNEL &&
+      sender.readyState === WebSocket.OPEN
+    ) {
+      notifySender(senderChannel, event);
+    }
+  });
+}
+
+function forwardAudio(channel, data) {
+  getReceiverTargets(channel).forEach((receiver) => {
+    if (receiver.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const health = receiverHealth.get(receiver) || { droppedFrames: 0 };
+    receiverHealth.set(receiver, health);
+
+    if (receiver.bufferedAmount > MAX_BUFFERED_BYTES) {
+      health.droppedFrames += 1;
+      if (health.droppedFrames >= MAX_CONSECUTIVE_DROPS) {
+        log(`Closing slow receiver: ${channel}`);
+        receiver.terminate();
+      }
+      return;
+    }
+
+    health.droppedFrames = 0;
+    safeSend(receiver, data, { binary: true, compress: false });
+  });
+}
+
+function removeReceiver(channel, ws) {
+  const remaining = getReceivers(channel).filter(
+    (receiver) => receiver !== ws,
+  );
+  if (remaining.length > 0) {
+    receiversByChannel.set(channel, remaining);
+  } else {
+    receiversByChannel.delete(channel);
+  }
+
+  log(`Receivers ${channel}: ${remaining.length}`);
+  notifySender(channel, 'receiver_left');
+  if (channel === DEFAULT_CHANNEL) {
+    notifyDefaultReceiverChange('receiver_left');
+  }
+}
+
+const server = http.createServer((req, res) => {
+  const body = isServiceOpen()
+    ? 'Audio Relay Server Running'
+    : 'Audio Relay Server Sleeping';
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+});
+
+const wss = new WebSocket.Server({
+  server,
+  maxPayload: MAX_AUDIO_MESSAGE_BYTES,
+  perMessageDeflate: false,
+});
+
+wss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
+  const { role, channel, valid } = parseConnection(req);
+
+  if (!valid) {
+    ws.close(1008, 'Invalid role or channel');
+    return;
+  }
   if (!isServiceOpen()) {
-    console.log(`Rejected outside service hours: ${role}/${channel}`);
+    log(`Rejected outside service hours: ${role}/${channel}`);
     ws.close(1000, 'Outside service hours');
     return;
   }
+  if (wss.clients.size > MAX_CONNECTIONS) {
+    log(`Rejected connection limit: ${role}/${channel}`);
+    ws.close(1013, 'Server busy');
+    return;
+  }
 
-  console.log(`Connected: ${role}/${channel}`);
+  log(`Connected: ${role}/${channel}`);
 
   if (role === 'sender') {
-    if (senders.has(channel)) {
-      const old = senders.get(channel);
-      if (old.readyState === WebSocket.OPEN) old.close();
-    }
+    const previousSender = senders.get(channel);
     senders.set(channel, ws);
-    console.log(`Sender connected: ${channel}`);
 
-    if (getOpenReceiverCount(channel) > 0) {
-      notifySender(channel, 'receiver_joined', getOpenReceiverCount(channel));
+    if (
+      previousSender &&
+      previousSender !== ws &&
+      previousSender.readyState !== WebSocket.CLOSED
+    ) {
+      log(`Replacing previous sender: ${channel}`);
+      previousSender.close(1012, 'Sender replaced');
+    }
+
+    const receiverCount = getOpenReceiverCount(channel);
+    if (receiverCount > 0) {
+      notifySender(channel, 'receiver_joined');
     }
 
     ws.on('message', (data, isBinary) => {
-      if (isBinary) {
-        getReceivers(channel).forEach(r => {
-          if (r.readyState === WebSocket.OPEN) r.send(data, { binary: true });
-        });
+      if (senders.get(channel) !== ws) {
+        return;
       }
+      if (!isBinary) {
+        log(`Sender message ${channel}: ${data.toString().slice(0, 200)}`);
+        return;
+      }
+      forwardAudio(channel, data);
     });
 
     ws.on('close', () => {
-      if (senders.get(channel) === ws) senders.delete(channel);
-      console.log(`Sender disconnected: ${channel}`);
+      if (senders.get(channel) === ws) {
+        senders.delete(channel);
+      }
+      log(`Sender disconnected: ${channel}`);
     });
-
-  } else if (role === 'receiver') {
-    const receivers = getReceivers(channel);
+  } else {
+    const receivers = ensureReceivers(channel);
     receivers.push(ws);
-    console.log(`Receivers ${channel}: ${receivers.length}`);
+    receiverHealth.set(ws, { droppedFrames: 0 });
+    log(`Receivers ${channel}: ${receivers.length}`);
 
-    // 延迟3秒检查冲突
-    if (conflictTimer) clearTimeout(conflictTimer);
-    conflictTimer = setTimeout(checkConflict, 3000);
+    notifySender(channel, 'receiver_joined');
+    if (channel === DEFAULT_CHANNEL) {
+      notifyDefaultReceiverChange('receiver_joined');
+    }
 
-    // 通知sender
-    notifySender(channel, 'receiver_joined', getOpenReceiverCount(channel));
-
+    let removed = false;
     ws.on('close', () => {
-      const remaining = getReceivers(channel).filter(r => r !== ws);
-      receiversByChannel.set(channel, remaining);
-      console.log(`Receivers ${channel}: ${remaining.length}`);
-      notifySender(channel, 'receiver_left', getOpenReceiverCount(channel));
+      if (removed) {
+        return;
+      }
+      removed = true;
+      removeReceiver(channel, ws);
     });
   }
 
-  ws.on('error', (err) => console.error('WS error:', err));
+  ws.on('error', (error) => {
+    log(`WebSocket error ${role}/${channel}: ${error.message}`);
+  });
 });
 
-setInterval(() => {
-  if (isServiceOpen()) return;
-  senders.forEach((sender) => {
-    if (sender.readyState === WebSocket.OPEN) sender.close(1000, 'Outside service hours');
-  });
-  receiversByChannel.forEach((receivers) => {
-    receivers.forEach((receiver) => {
-      if (receiver.readyState === WebSocket.OPEN) receiver.close(1000, 'Outside service hours');
+const healthInterval = setInterval(() => {
+  if (!isServiceOpen()) {
+    wss.clients.forEach((ws) => {
+      if (
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING
+      ) {
+        ws.close(1000, 'Outside service hours');
+      }
     });
-  });
-  senders.clear();
-  receiversByChannel.clear();
-}, 60 * 1000);
+    return;
+  }
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server on port ${PORT}`));
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch (error) {
+        log(`Ping failed: ${error.message}`);
+        ws.terminate();
+      }
+    }
+  });
+}, HEALTH_INTERVAL_MS);
+healthInterval.unref();
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  log(`Received ${signal}, shutting down`);
+  clearInterval(healthInterval);
+
+  wss.clients.forEach((ws) => {
+    try {
+      ws.close(1001, 'Server shutting down');
+    } catch (error) {
+      ws.terminate();
+    }
+  });
+
+  server.close(() => {
+    log('Server stopped');
+    process.exit(0);
+  });
+
+  setTimeout(() => process.exit(1), 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+server.on('error', (error) => {
+  log(`HTTP server error: ${error.message}`);
+});
+
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, () => log(`Server listening on port ${PORT}`));
