@@ -41,6 +41,31 @@ function waitForClose(ws) {
   });
 }
 
+function expectNoMessage(ws, timeoutMs = 250) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.off('message', onMessage);
+      ws.off('error', onError);
+    };
+    const onMessage = () => {
+      cleanup();
+      reject(new Error('unexpected message'));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, timeoutMs);
+
+    ws.once('message', onMessage);
+    ws.once('error', onError);
+  });
+}
+
 function waitForServer(child) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('server timeout')), 5000);
@@ -97,6 +122,27 @@ async function run() {
     const audio = await receivedAudio;
     assert.equal(audio.isBinary, true);
     assert.deepEqual([...audio.data], [1, 2, 3, 4]);
+
+    const rfiReceiver = new WebSocket(
+      `${TEST_URL}?role=receiver&channel=rfi`,
+    );
+    sockets.push(rfiReceiver);
+    await waitForOpen(rfiReceiver);
+    const isolated = expectNoMessage(rfiReceiver);
+    sender2.send(Buffer.from([5, 6, 7, 8]));
+    await isolated;
+
+    const receiverClosed = waitForClose(receiver);
+    const receiverLeft = waitForMessage(sender2);
+    receiver.close();
+    await receiverClosed;
+    const leftMessage = JSON.parse((await receiverLeft).data.toString());
+    assert.equal(leftMessage.event, 'receiver_left');
+    assert.equal(leftMessage.count, 0);
+
+    const invalid = new WebSocket(`${TEST_URL}?role=invalid&channel=dakang`);
+    sockets.push(invalid);
+    assert.equal(await waitForClose(invalid), 1008);
 
     console.log('Server integration test OK');
   } finally {

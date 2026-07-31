@@ -10,7 +10,7 @@ const DEFAULT_CHANNEL = 'default';
 const MAX_CHANNEL_LENGTH = 32;
 const MAX_AUDIO_MESSAGE_BYTES = 64 * 1024;
 const MAX_BUFFERED_BYTES = 64 * 1024;
-const MAX_CONSECUTIVE_DROPS = 300;
+const SLOW_RECEIVER_TIMEOUT_MS = 10 * 1000;
 const MAX_CONNECTIONS = 100;
 const HEALTH_INTERVAL_MS = 30 * 1000;
 
@@ -122,19 +122,20 @@ function forwardAudio(channel, data) {
       return;
     }
 
-    const health = receiverHealth.get(receiver) || { droppedFrames: 0 };
+    const health = receiverHealth.get(receiver) || { slowSince: null };
     receiverHealth.set(receiver, health);
 
     if (receiver.bufferedAmount > MAX_BUFFERED_BYTES) {
-      health.droppedFrames += 1;
-      if (health.droppedFrames >= MAX_CONSECUTIVE_DROPS) {
+      const now = Date.now();
+      health.slowSince ??= now;
+      if (now - health.slowSince >= SLOW_RECEIVER_TIMEOUT_MS) {
         log(`Closing slow receiver: ${channel}`);
         receiver.terminate();
       }
       return;
     }
 
-    health.droppedFrames = 0;
+    health.slowSince = null;
     safeSend(receiver, data, { binary: true, compress: false });
   });
 }
@@ -237,7 +238,7 @@ wss.on('connection', (ws, req) => {
   } else {
     const receivers = ensureReceivers(channel);
     receivers.push(ws);
-    receiverHealth.set(ws, { droppedFrames: 0 });
+    receiverHealth.set(ws, { slowSince: null });
     log(`Receivers ${channel}: ${receivers.length}`);
 
     notifySender(channel, 'receiver_joined');
