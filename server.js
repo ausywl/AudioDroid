@@ -236,15 +236,23 @@ wss.on('connection', (ws, req) => {
       log(`Sender disconnected: ${channel}`);
     });
   } else {
-    const receivers = ensureReceivers(channel);
-    receivers.push(ws);
+    const previousReceivers = getReceivers(channel).filter(
+      (receiver) =>
+        receiver !== ws && receiver.readyState !== WebSocket.CLOSED,
+    );
+    receiversByChannel.set(channel, [ws]);
     receiverHealth.set(ws, { slowSince: null });
-    log(`Receivers ${channel}: ${receivers.length}`);
+    log(`Receivers ${channel}: 1`);
 
     notifySender(channel, 'receiver_joined');
     if (channel === DEFAULT_CHANNEL) {
       notifyDefaultReceiverChange('receiver_joined');
     }
+
+    previousReceivers.forEach((receiver) => {
+      log(`Replacing previous receiver: ${channel}`);
+      receiver.close(1012, 'Receiver replaced');
+    });
 
     let removed = false;
     ws.on('close', () => {

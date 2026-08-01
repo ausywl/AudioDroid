@@ -123,6 +123,24 @@ async function run() {
     assert.equal(audio.isBinary, true);
     assert.deepEqual([...audio.data], [1, 2, 3, 4]);
 
+    const receiverReplaced = waitForClose(receiver);
+    const replacementJoined = waitForMessage(sender2);
+    const replacementReceiver = new WebSocket(
+      `${TEST_URL}?role=receiver&channel=dakang`,
+    );
+    sockets.push(replacementReceiver);
+    await waitForOpen(replacementReceiver);
+    assert.equal(await receiverReplaced, 1012);
+    assert.equal(
+      JSON.parse((await replacementJoined).data.toString()).count,
+      1,
+    );
+
+    const replacementAudio = waitForMessage(replacementReceiver);
+    sender2.send(Buffer.from([9, 10, 11, 12]));
+    const replacementPayload = await replacementAudio;
+    assert.deepEqual([...replacementPayload.data], [9, 10, 11, 12]);
+
     const rfiReceiver = new WebSocket(
       `${TEST_URL}?role=receiver&channel=rfi`,
     );
@@ -132,9 +150,9 @@ async function run() {
     sender2.send(Buffer.from([5, 6, 7, 8]));
     await isolated;
 
-    const receiverClosed = waitForClose(receiver);
+    const receiverClosed = waitForClose(replacementReceiver);
     const receiverLeft = waitForMessage(sender2);
-    receiver.close();
+    replacementReceiver.close();
     await receiverClosed;
     const leftMessage = JSON.parse((await receiverLeft).data.toString());
     assert.equal(leftMessage.event, 'receiver_left');
