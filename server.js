@@ -13,13 +13,35 @@ const MAX_BUFFERED_BYTES = 64 * 1024;
 const SLOW_RECEIVER_TIMEOUT_MS = 10 * 1000;
 const MAX_CONNECTIONS = 100;
 const HEALTH_INTERVAL_MS = 30 * 1000;
+const DUPLICATE_LOG_INTERVAL_MS = 10 * 60 * 1000;
 
 const senders = new Map();
 const receiversByChannel = new Map();
 const receiverHealth = new WeakMap();
+const duplicateReceiverLogs = new Map();
 
 function log(message) {
   console.log(`${new Date().toISOString()} ${message}`);
+}
+
+function logDuplicateReceiver(channel) {
+  const now = Date.now();
+  const state = duplicateReceiverLogs.get(channel) || {
+    lastLoggedAt: 0,
+    suppressed: 0,
+  };
+
+  if (now - state.lastLoggedAt >= DUPLICATE_LOG_INTERVAL_MS) {
+    const suffix = state.suppressed
+      ? ` (${state.suppressed} similar attempts suppressed)`
+      : '';
+    log(`Rejecting duplicate receiver: ${channel}${suffix}`);
+    state.lastLoggedAt = now;
+    state.suppressed = 0;
+  } else {
+    state.suppressed += 1;
+  }
+  duplicateReceiverLogs.set(channel, state);
 }
 
 function getServiceMinutes() {
@@ -198,9 +220,8 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  log(`Connected: ${role}/${channel}`);
-
   if (role === 'sender') {
+    log(`Connected: sender/${channel}`);
     const previousSender = senders.get(channel);
     senders.set(channel, ws);
 
@@ -240,11 +261,12 @@ wss.on('connection', (ws, req) => {
       (receiver) => receiver.readyState === WebSocket.OPEN,
     );
     if (existingReceiver) {
-      log(`Rejecting duplicate receiver: ${channel}`);
+      logDuplicateReceiver(channel);
       ws.close(1000, 'Receiver already connected');
       return;
     }
 
+    log(`Connected: receiver/${channel}`);
     receiversByChannel.set(channel, [ws]);
     receiverHealth.set(ws, { slowSince: null });
     log(`Receivers ${channel}: 1`);
