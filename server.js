@@ -13,36 +13,13 @@ const MAX_BUFFERED_BYTES = 64 * 1024;
 const SLOW_RECEIVER_TIMEOUT_MS = 10 * 1000;
 const MAX_CONNECTIONS = 100;
 const HEALTH_INTERVAL_MS = 30 * 1000;
-const DUPLICATE_LOG_INTERVAL_MS = 10 * 60 * 1000;
-const SENDER_HEARTBEAT_MESSAGE = JSON.stringify({ event: 'heartbeat' });
 
 const senders = new Map();
 const receiversByChannel = new Map();
 const receiverHealth = new WeakMap();
-const duplicateReceiverLogs = new Map();
 
 function log(message) {
   console.log(`${new Date().toISOString()} ${message}`);
-}
-
-function logDuplicateReceiver(channel) {
-  const now = Date.now();
-  const state = duplicateReceiverLogs.get(channel) || {
-    lastLoggedAt: 0,
-    suppressed: 0,
-  };
-
-  if (now - state.lastLoggedAt >= DUPLICATE_LOG_INTERVAL_MS) {
-    const suffix = state.suppressed
-      ? ` (${state.suppressed} similar attempts suppressed)`
-      : '';
-    log(`Rejecting duplicate receiver: ${channel}${suffix}`);
-    state.lastLoggedAt = now;
-    state.suppressed = 0;
-  } else {
-    state.suppressed += 1;
-  }
-  duplicateReceiverLogs.set(channel, state);
 }
 
 function getServiceMinutes() {
@@ -258,19 +235,11 @@ wss.on('connection', (ws, req) => {
       log(`Sender disconnected: ${channel}`);
     });
   } else {
-    const existingReceiver = getReceivers(channel).find(
-      (receiver) => receiver.readyState === WebSocket.OPEN,
-    );
-    if (existingReceiver) {
-      logDuplicateReceiver(channel);
-      ws.close(1000, 'Receiver already connected');
-      return;
-    }
-
     log(`Connected: receiver/${channel}`);
-    receiversByChannel.set(channel, [ws]);
+    const receivers = ensureReceivers(channel);
+    receivers.push(ws);
     receiverHealth.set(ws, { slowSince: null });
-    log(`Receivers ${channel}: 1`);
+    log(`Receivers ${channel}: ${receivers.length}`);
 
     notifySender(channel, 'receiver_joined');
     if (channel === DEFAULT_CHANNEL) {
@@ -321,17 +290,6 @@ const healthInterval = setInterval(() => {
     }
   });
 
-  senders.forEach((sender, channel) => {
-    if (sender.readyState !== WebSocket.OPEN) {
-      return;
-    }
-    try {
-      sender.send(SENDER_HEARTBEAT_MESSAGE);
-    } catch (error) {
-      log(`Heartbeat failed sender/${channel}: ${error.message}`);
-      sender.terminate();
-    }
-  });
 }, HEALTH_INTERVAL_MS);
 healthInterval.unref();
 
