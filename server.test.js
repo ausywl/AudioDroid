@@ -127,7 +127,18 @@ async function run() {
       `${TEST_URL}?role=receiver&channel=dakang`,
     );
     sockets.push(duplicateReceiver);
-    assert.equal(await waitForClose(duplicateReceiver), 1000);
+    await waitForOpen(duplicateReceiver);
+    await expectNoMessage(sender2);
+
+    const originalDuplicateAudio = waitForMessage(receiver);
+    const secondDuplicateAudio = waitForMessage(duplicateReceiver);
+    sender2.send(Buffer.from([13, 14, 15, 16]));
+    assert.deepEqual([...(await originalDuplicateAudio).data], [13, 14, 15, 16]);
+    assert.deepEqual([...(await secondDuplicateAudio).data], [13, 14, 15, 16]);
+
+    const duplicateClosed = waitForClose(duplicateReceiver);
+    duplicateReceiver.close();
+    await duplicateClosed;
     await expectNoMessage(sender2);
 
     const replacementAudio = waitForMessage(receiver);
