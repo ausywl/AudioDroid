@@ -151,9 +151,11 @@ function removeReceiver(channel, ws) {
   }
 
   log(`Receivers ${channel}: ${remaining.length}`);
-  notifySender(channel, 'receiver_left');
-  if (channel === DEFAULT_CHANNEL) {
-    notifyDefaultReceiverChange('receiver_left');
+  if (getOpenReceiverCount(channel) === 0) {
+    notifySender(channel, 'receiver_left');
+    if (channel === DEFAULT_CHANNEL) {
+      notifyDefaultReceiverChange('receiver_left');
+    }
   }
 }
 
@@ -235,15 +237,18 @@ wss.on('connection', (ws, req) => {
       log(`Sender disconnected: ${channel}`);
     });
   } else {
+    const hadOpenReceiver = getOpenReceiverCount(channel) > 0;
     log(`Connected: receiver/${channel}`);
     const receivers = ensureReceivers(channel);
     receivers.push(ws);
     receiverHealth.set(ws, { slowSince: null });
     log(`Receivers ${channel}: ${receivers.length}`);
 
-    notifySender(channel, 'receiver_joined');
-    if (channel === DEFAULT_CHANNEL) {
-      notifyDefaultReceiverChange('receiver_joined');
+    if (!hadOpenReceiver) {
+      notifySender(channel, 'receiver_joined');
+      if (channel === DEFAULT_CHANNEL) {
+        notifyDefaultReceiverChange('receiver_joined');
+      }
     }
 
     let removed = false;
