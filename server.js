@@ -14,6 +14,7 @@ const SLOW_RECEIVER_TIMEOUT_MS = 10 * 1000;
 const MAX_CONNECTIONS = 100;
 const HEALTH_INTERVAL_MS = 30 * 1000;
 const DUPLICATE_LOG_INTERVAL_MS = 10 * 60 * 1000;
+const SENDER_HEARTBEAT_MESSAGE = JSON.stringify({ event: 'heartbeat' });
 
 const senders = new Map();
 const receiversByChannel = new Map();
@@ -317,6 +318,18 @@ const healthInterval = setInterval(() => {
         log(`Ping failed: ${error.message}`);
         ws.terminate();
       }
+    }
+  });
+
+  senders.forEach((sender, channel) => {
+    if (sender.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      sender.send(SENDER_HEARTBEAT_MESSAGE);
+    } catch (error) {
+      log(`Heartbeat failed sender/${channel}: ${error.message}`);
+      sender.terminate();
     }
   });
 }, HEALTH_INTERVAL_MS);
