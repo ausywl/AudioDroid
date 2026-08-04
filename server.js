@@ -17,6 +17,8 @@ const HEALTH_INTERVAL_MS = 30 * 1000;
 const senders = new Map();
 const receiversByChannel = new Map();
 const receiverHealth = new WeakMap();
+const receiverSequence = new WeakMap();
+let nextReceiverSequence = 1;
 
 function log(message) {
   console.log(`${new Date().toISOString()} ${message}`);
@@ -77,6 +79,24 @@ function getOpenReceiverCount(channel) {
   ).length;
 }
 
+function getActiveReceiver(channel) {
+  let activeReceiver = null;
+  let activeSequence = -1;
+
+  getReceiverTargets(channel).forEach((receiver) => {
+    if (receiver.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const sequence = receiverSequence.get(receiver) || 0;
+    if (sequence > activeSequence) {
+      activeReceiver = receiver;
+      activeSequence = sequence;
+    }
+  });
+
+  return activeReceiver;
+}
+
 function safeSend(ws, payload, options) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     return false;
@@ -117,27 +137,26 @@ function notifyDefaultReceiverChange(event) {
 }
 
 function forwardAudio(channel, data) {
-  getReceiverTargets(channel).forEach((receiver) => {
-    if (receiver.readyState !== WebSocket.OPEN) {
-      return;
+  const receiver = getActiveReceiver(channel);
+  if (!receiver) {
+    return;
+  }
+
+  const health = receiverHealth.get(receiver) || { slowSince: null };
+  receiverHealth.set(receiver, health);
+
+  if (receiver.bufferedAmount > MAX_BUFFERED_BYTES) {
+    const now = Date.now();
+    health.slowSince ??= now;
+    if (now - health.slowSince >= SLOW_RECEIVER_TIMEOUT_MS) {
+      log(`Closing slow receiver: ${channel}`);
+      receiver.terminate();
     }
+    return;
+  }
 
-    const health = receiverHealth.get(receiver) || { slowSince: null };
-    receiverHealth.set(receiver, health);
-
-    if (receiver.bufferedAmount > MAX_BUFFERED_BYTES) {
-      const now = Date.now();
-      health.slowSince ??= now;
-      if (now - health.slowSince >= SLOW_RECEIVER_TIMEOUT_MS) {
-        log(`Closing slow receiver: ${channel}`);
-        receiver.terminate();
-      }
-      return;
-    }
-
-    health.slowSince = null;
-    safeSend(receiver, data, { binary: true, compress: false });
-  });
+  health.slowSince = null;
+  safeSend(receiver, data, { binary: true, compress: false });
 }
 
 function removeReceiver(channel, ws) {
@@ -242,6 +261,7 @@ wss.on('connection', (ws, req) => {
     const receivers = ensureReceivers(channel);
     receivers.push(ws);
     receiverHealth.set(ws, { slowSince: null });
+    receiverSequence.set(ws, nextReceiverSequence++);
     log(`Receivers ${channel}: ${receivers.length}`);
 
     if (!hadOpenReceiver) {

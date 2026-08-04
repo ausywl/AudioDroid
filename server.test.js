@@ -130,11 +130,11 @@ async function run() {
     await waitForOpen(duplicateReceiver);
     await expectNoMessage(sender2);
 
-    const originalDuplicateAudio = waitForMessage(receiver);
+    const originalDuplicateAudio = expectNoMessage(receiver);
     const secondDuplicateAudio = waitForMessage(duplicateReceiver);
     sender2.send(Buffer.from([13, 14, 15, 16]));
-    assert.deepEqual([...(await originalDuplicateAudio).data], [13, 14, 15, 16]);
     assert.deepEqual([...(await secondDuplicateAudio).data], [13, 14, 15, 16]);
+    await originalDuplicateAudio;
 
     const duplicateClosed = waitForClose(duplicateReceiver);
     duplicateReceiver.close();
