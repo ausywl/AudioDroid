@@ -97,12 +97,12 @@ function getActiveReceiver(channel) {
   return activeReceiver;
 }
 
-function safeSend(ws, payload, options) {
+function safeSend(ws, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     return false;
   }
   try {
-    ws.send(payload, options);
+    ws.send(payload);
     return true;
   } catch (error) {
     log(`Send failed: ${error.message}`);
@@ -156,7 +156,7 @@ function forwardAudio(channel, data) {
   }
 
   health.slowSince = null;
-  safeSend(receiver, data, { binary: true, compress: false });
+  safeSend(receiver, data);
 }
 
 function removeReceiver(channel, ws) {
@@ -179,15 +179,11 @@ function removeReceiver(channel, ws) {
 }
 
 const server = http.createServer((req, res) => {
-  const body = isServiceOpen()
-    ? 'Audio Relay Server Running'
-    : 'Audio Relay Server Sleeping';
   res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Content-Length': Buffer.byteLength(body),
+    'Content-Length': '0',
   });
-  res.end(body);
+  res.end();
 });
 
 const wss = new WebSocket.Server({

@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const { spawn } = require('child_process');
+const http = require('http');
 const path = require('path');
 const WebSocket = require('ws');
 
@@ -84,6 +85,23 @@ function waitForServer(child) {
   });
 }
 
+function getHttpResponse() {
+  return new Promise((resolve, reject) => {
+    const request = http.get(`http://127.0.0.1:${TEST_PORT}/`, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        resolve({
+          statusCode: response.statusCode,
+          contentLength: response.headers['content-length'],
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    request.on('error', reject);
+  });
+}
+
 async function run() {
   const server = spawn(process.execPath, ['server.js'], {
     cwd: __dirname,
@@ -98,6 +116,11 @@ async function run() {
   const sockets = [];
   try {
     await waitForServer(server);
+
+    const httpResponse = await getHttpResponse();
+    assert.equal(httpResponse.statusCode, 200);
+    assert.equal(httpResponse.contentLength, '0');
+    assert.equal(httpResponse.body.length, 0);
 
     const receiver = new WebSocket(`${TEST_URL}?role=receiver&channel=dakang`);
     sockets.push(receiver);
